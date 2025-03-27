@@ -110,17 +110,20 @@ FKEY = '+'
 def partial_to_dict(p: functools.partial, version="3"):
   assert not p.args, "So far only keyword arguments are supported, here"
   sig = inspect.signature(p.func)
-  # Build dictionary of defaults from the signature.
+  # Build a dictionary of defaults from the signature.
   fields = {k: v.default for k, v in sig.parameters.items() if v.default is not inspect.Parameter.empty}
-  # Special-case: if the function is GymEnv, ignore extra keywords.
-  if p.func.__qualname__ == "GymEnv" and p.func.__module__.startswith("rtrl.envs"):
-      # Simply merge all keywords without diff checking.
-      fields.update(p.keywords)
-      nested = {k: partial_to_dict(functools.partial(v), version="") for k, v in fields.items() if callable(v)}
-      simple = {k: v for k, v in fields.items() if k not in nested}
-      output = {FKEY: p.func.__module__ + ":" + p.func.__qualname__, **simple, **nested}
-      return dict(output, __format_version__=version) if version else output
-
+  # Special handling for GymEnv: if p.func is GymEnv and "kwds" is in p.keywords,
+  # remove the "kwds" key and merge its contents with the other keywords.
+  if p.func.__qualname__ == "GymEnv" and "kwds" in p.keywords:
+    new_kw = p.keywords.copy()
+    # Pop "kwds" and merge its dictionary into new_kw.
+    extra = new_kw.pop("kwds")
+    if isinstance(extra, dict):
+      new_kw.update(extra)
+    p = functools.partial(p.func, **new_kw)
+  # If "kwds" is expected but not provided, add an empty dict.
+  if "kwds" in sig.parameters and "kwds" not in fields:
+    fields["kwds"] = {}
   diff = set(p.keywords.keys()) - set(fields.keys())
   assert not diff, f"There are invalid keywords present: {diff}"
   fields.update(p.keywords)
