@@ -109,20 +109,36 @@ FKEY = '+'
 
 def partial_to_dict(p: functools.partial, version="3"):
   assert not p.args, "So far only keyword arguments are supported, here"
-  # Build a dictionary of default values from the signature.
-  fields = {k: v.default for k, v in inspect.signature(p.func).parameters.items()}
-  fields = {k: v for k, v in fields.items() if v is not inspect.Parameter.empty}
-  # If the function has a parameter 'kwds' but it isn't in fields, add it with default {}.
   sig = inspect.signature(p.func)
-  if "kwds" in sig.parameters and "kwds" not in fields:
+  # Build dictionary of defaults from the function signature.
+  fields = {k: v.default for k, v in sig.parameters.items() if v.default is not inspect.Parameter.empty}
+  # If the target function only accepts 'args' and 'kwds' (e.g. GymEnv), merge all extra keywords.
+  allowed = set(sig.parameters.keys())
+  if allowed == {"args", "kwds"}:
+    # Extract extra keywords that are not 'args' or 'kwds'
+    extras = {k: v for k, v in p.keywords.items() if k not in {"args", "kwds"}}
+    # Get the valid keywords already provided (if any)
+    valid = {k: v for k, v in p.keywords.items() if k in {"args", "kwds"}}
+    # Ensure 'kwds' exists and is a dict.
+    merged = valid.get("kwds", {})
+    if not isinstance(merged, dict):
+      merged = {}
+    merged.update(extras)
+    valid["kwds"] = merged
+    # Rebuild the partial so that only 'args' and 'kwds' appear.
+    p = functools.partial(p.func, **valid)
+    # Also add 'kwds' to the fields if missing.
+    if "kwds" not in fields:
       fields["kwds"] = {}
+  # Check that all keywords in p are allowed.
   diff = p.keywords.keys() - fields.keys()
   assert not diff, f"There are invalid keywords present: {diff}"
   fields.update(p.keywords)
-  nested = {k: partial_to_dict(partial(v), version="") for k, v in fields.items() if callable(v)}
+  nested = {k: partial_to_dict(functools.partial(v), version="") for k, v in fields.items() if callable(v)}
   simple = {k: v for k, v in fields.items() if k not in nested}
   output = {FKEY: p.func.__module__ + ":" + p.func.__qualname__, **simple, **nested}
   return dict(output, __format_version__=version) if version else output
+
   
 
 def partial_from_dict(d: dict):
