@@ -108,22 +108,14 @@ FKEY = '+'
 
 
 def partial_to_dict(p: functools.partial, version="3"):
-  # If the target function only accepts 'args' and 'kwds',
-  # merge any extra keywords into a single 'kwds' dictionary.
-  params = inspect.signature(p.func).parameters
-  if set(params.keys()) == {"args", "kwds"}:
-    merged = {}
-    for k, v in p.keywords.items():
-      if k == "kwds" and isinstance(v, dict):
-        merged.update(v)
-      else:
-        merged[k] = v
-    # Replace p with a new partial that only has the 'kwds' key.
-    p = functools.partial(p.func, kwds=merged)
-
   assert not p.args, "So far only keyword arguments are supported, here"
+  # Build a dictionary of default values from the signature.
   fields = {k: v.default for k, v in inspect.signature(p.func).parameters.items()}
   fields = {k: v for k, v in fields.items() if v is not inspect.Parameter.empty}
+  # If the function has a parameter 'kwds' but it isn't in fields, add it with default {}.
+  sig = inspect.signature(p.func)
+  if "kwds" in sig.parameters and "kwds" not in fields:
+      fields["kwds"] = {}
   diff = p.keywords.keys() - fields.keys()
   assert not diff, f"There are invalid keywords present: {diff}"
   fields.update(p.keywords)
@@ -131,7 +123,7 @@ def partial_to_dict(p: functools.partial, version="3"):
   simple = {k: v for k, v in fields.items() if k not in nested}
   output = {FKEY: p.func.__module__ + ":" + p.func.__qualname__, **simple, **nested}
   return dict(output, __format_version__=version) if version else output
-
+  
 
 def partial_from_dict(d: dict):
   d = d.copy()
