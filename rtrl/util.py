@@ -141,16 +141,21 @@ def get_class_or_function(func):
   module, name = func.split(":")
   return getattr(import_module(module), name)
 
+# we should extract the actual function from the functools.partial
+# using a helper that repeatedly takes the .func attribute
+def unwrap_partial(func):
+    while isinstance(func, functools.partial):
+        func = func.func
+    return func
+
 
 def partial_from_args(func: Union[str, callable], kwargs: Dict[str, str]):
-  # Resolve function if provided as a string.
-  func = get_class_or_function(func) if isinstance(func, str) else func
-  params = inspect.signature(func).parameters
-  # Special-case: if the function is GymEnv, pass all keys directly (after stripping any dotted prefixes)
-  if func.__qualname__ == "GymEnv" and func.__module__.startswith("rtrl.envs"):
+  if isinstance(func, str):
+      func = get_class_or_function(func)
+  base_func = unwrap_partial(func)
+  if base_func.__qualname__ == "GymEnv" and base_func.__module__.startswith("rtrl.envs"):
       new_kwargs = {}
       for k, v in kwargs.items():
-          # If key has a dot (e.g. "Env.id"), take the part after the dot.
           if '.' in k:
               _, subkey = k.split('.', 1)
               new_kwargs[subkey] = v
@@ -158,20 +163,20 @@ def partial_from_args(func: Union[str, callable], kwargs: Dict[str, str]):
               new_kwargs[k] = v
       return functools.partial(func, **new_kwargs)
   
-  # Otherwise, do the usual processing.
   keys = {k.split('.')[0] for k in kwargs}
   keywords = {}
   for key in keys:
-    assert key in params, f"'{key}' is not a valid parameter of {func}. Valid parameters are {tuple(params.keys())}."
-    param = params[key]
-    value = kwargs.get(key, param.default)
-    if param.annotation is type:
-      sub_keywords = {k.split('.', 1)[1]: v for k, v in kwargs.items() if k.startswith(key + '.')}
-      keywords[key] = partial_from_args(value, sub_keywords)
-    elif param.annotation is bool:
-      keywords[key] = bool(eval(value))  # because bool('False') is True otherwise
-    else:
-      keywords[key] = param.annotation(value)
+      params = inspect.signature(func).parameters
+      assert key in params, f"'{key}' is not a valid parameter of {func}. Valid parameters are {tuple(params.keys())}."
+      param = params[key]
+      value = kwargs.get(key, param.default)
+      if param.annotation is type:
+          sub_keywords = {k.split('.', 1)[1]: v for k, v in kwargs.items() if k.startswith(key + '.')}
+          keywords[key] = partial_from_args(value, sub_keywords)
+      elif param.annotation is bool:
+          keywords[key] = bool(eval(value))
+      else:
+          keywords[key] = param.annotation(value)
   return functools.partial(func, **keywords)
 
 
