@@ -30,6 +30,8 @@ class Mlp(ActorModule):
 
   def forward(self, x):
     assert isinstance(x, tuple)
+    # Ensure each element is a Tensor; if it's a tuple, take the first element.
+    x = tuple(elem if isinstance(elem, torch.Tensor) else elem[0] for elem in x)
     x = torch.cat(x, dim=1)
     h = self.net(x)
     v = self.critic_layer(h)
