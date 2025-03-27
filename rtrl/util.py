@@ -108,6 +108,19 @@ FKEY = '+'
 
 
 def partial_to_dict(p: functools.partial, version="3"):
+  # If the target function only accepts 'args' and 'kwds',
+  # merge any extra keywords into a single 'kwds' dictionary.
+  params = inspect.signature(p.func).parameters
+  if set(params.keys()) == {"args", "kwds"}:
+    merged = {}
+    for k, v in p.keywords.items():
+      if k == "kwds" and isinstance(v, dict):
+        merged.update(v)
+      else:
+        merged[k] = v
+    # Replace p with a new partial that only has the 'kwds' key.
+    p = functools.partial(p.func, kwds=merged)
+
   assert not p.args, "So far only keyword arguments are supported, here"
   fields = {k: v.default for k, v in inspect.signature(p.func).parameters.items()}
   fields = {k: v for k, v in fields.items() if v is not inspect.Parameter.empty}
