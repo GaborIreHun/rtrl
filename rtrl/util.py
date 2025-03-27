@@ -108,22 +108,18 @@ FKEY = '+'
 
 
 def partial_to_dict(p: functools.partial, version="3"):
+  # For GymEnv, bypass diff checking and return keywords as-is.
+  if p.func.__qualname__ == "GymEnv" and p.func.__module__.startswith("rtrl.envs"):
+      output = {FKEY: p.func.__module__ + ":" + p.func.__qualname__}
+      output.update(p.keywords)
+      return dict(output, __format_version__=version) if version else output
+
+  # Otherwise, do the usual processing.
   assert not p.args, "So far only keyword arguments are supported, here"
   sig = inspect.signature(p.func)
-  # Build a dictionary of defaults from the signature.
   fields = {k: v.default for k, v in sig.parameters.items() if v.default is not inspect.Parameter.empty}
-  # Special handling for GymEnv: if p.func is GymEnv and "kwds" is in p.keywords,
-  # remove the "kwds" key and merge its contents with the other keywords.
-  if p.func.__qualname__ == "GymEnv" and "kwds" in p.keywords:
-    new_kw = p.keywords.copy()
-    # Pop "kwds" and merge its dictionary into new_kw.
-    extra = new_kw.pop("kwds")
-    if isinstance(extra, dict):
-      new_kw.update(extra)
-    p = functools.partial(p.func, **new_kw)
-  # If "kwds" is expected but not provided, add an empty dict.
   if "kwds" in sig.parameters and "kwds" not in fields:
-    fields["kwds"] = {}
+      fields["kwds"] = {}
   diff = set(p.keywords.keys()) - set(fields.keys())
   assert not diff, f"There are invalid keywords present: {diff}"
   fields.update(p.keywords)
