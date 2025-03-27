@@ -134,30 +134,36 @@ def get_class_or_function(func):
 
 
 def partial_from_args(func: Union[str, callable], kwargs: Dict[str, str]):
-  # Resolve the function if given as a string.
   func = get_class_or_function(func) if isinstance(func, str) else func
-  keys = {k.split('.')[0] for k in kwargs}
-  keywords = {}
-  for key in keys:
-    params = inspect.signature(func).parameters
-    assert key in params, f"'{key}' is not a valid parameter of {func}. Valid parameters are {tuple(params.keys())}."
-    param = params[key]
-    value = kwargs.get(key, param.default)
-    if param.annotation is type:
-      # Extract sub-keywords for the nested parameter.
-      sub_keywords = {k.split('.', 1)[1]: v for k, v in kwargs.items() if k.startswith(key + '.')}
-      # Check if the target callable's signature only accepts 'args' and 'kwds'
-      sub_params = inspect.signature(value).parameters
-      if set(sub_params.keys()) == {'args', 'kwds'}:
-        # Nest all sub_keywords into 'kwds'
-        keywords[key] = functools.partial(value, kwds=sub_keywords)
+  params = inspect.signature(func).parameters
+  allowed = set(params.keys())
+  # If the target callable only accepts 'args' and 'kwds', merge all kwargs into 'kwds'.
+  if allowed == {"args", "kwds"}:
+    new_kwds = {}
+    for k, v in kwargs.items():
+      # If the key is dotted, take the part after the dot.
+      if '.' in k:
+        _, subkey = k.split('.', 1)
+        new_kwds[subkey] = v
       else:
+        new_kwds[k] = v
+    return functools.partial(func, kwds=new_kwds)
+  else:
+    keys = {k.split('.')[0] for k in kwargs}
+    keywords = {}
+    for key in keys:
+      assert key in params, f"'{key}' is not a valid parameter of {func}. Valid parameters are {tuple(params.keys())}."
+      param = params[key]
+      value = kwargs.get(key, param.default)
+      if param.annotation is type:
+        sub_keywords = {k.split('.', 1)[1]: v for k, v in kwargs.items() if k.startswith(key + '.')}
         keywords[key] = partial_from_args(value, sub_keywords)
-    elif param.annotation is bool:
-      keywords[key] = bool(eval(value))  # because bool('False') is True if not converted
-    else:
-      keywords[key] = param.annotation(value)
-  return functools.partial(func, **keywords)
+      elif param.annotation is bool:
+        keywords[key] = bool(eval(value))  # avoid bool('False') becoming True
+      else:
+        keywords[key] = param.annotation(value)
+    return functools.partial(func, **keywords)
+
 
 # === git ==============================================================================================================
 
