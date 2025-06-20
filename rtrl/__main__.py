@@ -14,6 +14,10 @@ import sys
 from rtrl import *
 from rtrl.util import partial_from_args
 
+import torch
+
+torch.autograd.set_detect_anomaly(True)
+
 _, cmd, *args = sys.argv
 
 

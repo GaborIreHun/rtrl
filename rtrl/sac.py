@@ -12,6 +12,7 @@ from rtrl.nn import PopArt, no_grad, copy_shared, exponential_moving_average, hd
 from rtrl.util import cached_property, partial
 import rtrl.sac_models
 
+DEBUGGER = True
 
 @dataclass(eq=0)
 class Agent:
@@ -31,7 +32,7 @@ class Agent:
   device: str = None
   training_interval: int = 1
 
-  model_nograd = cached_property(lambda self: no_grad(copy_shared(self.model)))
+  model_nograd = cached_property(lambda self: no_grad(deepcopy(self.model)))
 
   num_updates = 0
   training_steps = 0
@@ -50,69 +51,116 @@ class Agent:
     self.outputnorm_target = self.OutputNorm(self.model_target.critic_output_layers)
 
   def act(self, obs, r, done, info, train=False):
+    # Ensure obs is a copy, not a view or reused array
+    if isinstance(obs, np.ndarray):
+        obs = np.copy(obs)
     stats = []
     action, _ = self.model.act(obs, r, done, info, train)
 
     if train:
       self.memory.append(np.float32(r), np.float32(done), info, obs, action)
       if len(self.memory) >= self.start_training and self.training_steps % self.training_interval == 0:
-        stats += self.train(),
-      self.training_steps += 1
+        stats = stats + self.train(),
+      self.training_steps = self.training_steps + 1
     return action, stats
 
   def train(self):
     obs, actions, rewards, next_obs, terminals = self.memory.sample()
-    rewards, terminals = rewards[:, None], terminals[:, None]  # expand for correct broadcasting below
+    rewards, terminals = rewards[:, None], terminals[:, None]
 
-    new_action_distribution = self.model.actor(obs)
-    new_actions = new_action_distribution.rsample()
+    # ---- Sample new actions ----
+    new_dist = self.model.actor(obs)
+    new_actions = new_dist.rsample()
+    if DEBUGGER:
+        print("new_actions version:", new_actions._version)
 
-    # critic loss
-    next_action_distribution = self.model_nograd.actor(next_obs)
-    next_actions = next_action_distribution.sample()
-    next_value = [c(next_obs, next_actions) for c in self.model_target.critics]
-    next_value = reduce(torch.min, next_value)
+    # ---- Compute target Q via target networks ----
+    next_dist = self.model_nograd.actor(next_obs)
+    next_actions = next_dist.rsample()
+    if DEBUGGER:
+        print("next_actions version:", next_actions._version)
+
+    next_values = [c(next_obs, next_actions) for c in self.model_target.critics]
+    next_value = reduce(torch.min, next_values)
+    if DEBUGGER:
+        print("next_value version:", next_value._version)
+
+    # Unnormalize, subtract entropy
     next_value = self.outputnorm_target.unnormalize(next_value)
-    next_value = next_value - self.entropy_scale * next_action_distribution.log_prob(next_actions)[:, None]
+    if DEBUGGER:
+        print("next_value after unnormalize version:", next_value._version)
 
-    value_target = self.reward_scale * rewards + (1. - terminals) * self.discount * next_value
-    value_target = self.outputnorm.update(value_target)
+    next_value = next_value - self.entropy_scale * next_dist.log_prob(next_actions)[:, None]
+    if DEBUGGER:
+        print("next_value after entropy version:", next_value._version)
 
+    # 1) build the raw Bellman target
+    value_target = self.reward_scale * rewards \
+                 + (1.0 - terminals) * self.discount * next_value
+    if DEBUGGER:
+        print("value_target version:", value_target._version)
+
+    # detach before stats so no gradient flows into targets
+    value_target_detached = value_target.detach()
+
+    # update running mean/std (no_grad) then get a fresh normalized copy
+    self.outputnorm.update_stats(value_target_detached)
+    value_target_norm = self.outputnorm.normalize(value_target_detached)
+    if DEBUGGER:
+        print("value_target_norm version:", value_target_norm._version)
+
+    # ---- Critic loss ----
     values = [c(obs, actions) for c in self.model.critics]
-    assert values[0].shape == value_target.shape and not value_target.requires_grad
-    loss_critic = sum(mse_loss(v, value_target) for v in values)
+    assert values[0].shape == value_target.shape
+    loss_critic = sum(mse_loss(v, value_target_norm) for v in values)
 
-    # actor loss
-    new_value = [c(obs, new_actions) for c in self.model.critics]
-    new_value = reduce(torch.min, new_value)
-    new_value = self.outputnorm.unnormalize(new_value)
+    # ---- Actor loss ----
+    # evaluate Q under the new policy, then unnormalize
+    new_vals = [c(obs, new_actions.detach()) for c in self.model.critics]
+    new_val  = reduce(torch.min, new_vals)
+    new_val  = self.outputnorm.unnormalize(new_val)
 
-    loss_actor = self.entropy_scale * new_action_distribution.log_prob(new_actions)[:, None] - new_value
+    raw_lp = new_dist.log_prob(new_actions)[:, None]
+    loss_actor = self.entropy_scale * raw_lp - new_val
     assert loss_actor.shape == (self.batchsize, 1)
     loss_actor = self.outputnorm.normalize(loss_actor).mean()
 
-    # update actor and critic
+    # ---- Optimize critic ----
     self.critic_optimizer.zero_grad()
     loss_critic.backward()
     self.critic_optimizer.step()
 
+    # ---- Optimize actor ----
     self.actor_optimizer.zero_grad()
+    if DEBUGGER:
+        print("DEBUG new_val version:", new_val._version)
+        print("DEBUG raw_lp version:", raw_lp._version)
+        print("DEBUG loss_actor version:", loss_actor._version)
     loss_actor.backward()
     self.actor_optimizer.step()
 
-    # self.outputnorm.normalize(value_target, update=True)  # This is not the right place to update PopArt
-
-    # update target critics and normalizers
-    exponential_moving_average(self.model_target.critics.parameters(), self.model.critics.parameters(), self.target_update)
-    exponential_moving_average(self.outputnorm_target.parameters(), self.outputnorm.parameters(), self.target_update)
+    # ---- Soft‐update targets ----
+    # ---- Soft‐update both network and normalizer targets ----
+    exponential_moving_average(
+        self.model_target.critics.parameters(),
+        self.model.critics.parameters(),
+        self.target_update
+    )
+    exponential_moving_average(
+        self.outputnorm_target.parameters(),
+        self.outputnorm.parameters(),
+        self.target_update
+    )
 
     return dict(
-      loss_actor=loss_actor.detach().item(),
-      loss_critic=loss_critic.detach().item(),
-      outputnorm_mean=float(self.outputnorm.mean),
-      outputnorm_std=float(self.outputnorm.std),
-      memory_size=len(self.memory),
+        loss_actor=loss_actor.item(),
+        loss_critic=loss_critic.item(),
+        outputnorm_mean=float(self.outputnorm.mean),
+        outputnorm_std=float(self.outputnorm.std),
+        memory_size=len(self.memory),
     )
+
+
 
 
 AvenueAgent = partial(

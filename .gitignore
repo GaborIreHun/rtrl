@@ -106,3 +106,10 @@ venv.bak/
 .mypy_cache/
 experiment-1/state/
 experiment-1/state/
+experiment-1/spec.json
+experiment-1/state
+experiment-1/stats
+
+experiment-2/
+
+experiment-3/

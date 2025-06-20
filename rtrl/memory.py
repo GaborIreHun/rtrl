@@ -1,6 +1,15 @@
 from random import randint
 from rtrl.util import collate
+import numpy as np
+import torch
 
+def _safe_copy(x):
+  if isinstance(x, np.ndarray):
+      return x.copy()
+  elif isinstance(x, torch.Tensor):
+      return x.clone()
+  else:
+      return x
 
 class Memory:
   keep_reset_transitions: int = 0
@@ -24,10 +33,16 @@ class Memory:
         store = not info.get('TimeLimit.truncated', False) and not info.get('reset', False)
 
       if store:
-        self.memory.append((self.last_observation, self.last_action, r, obs, done))
+        self.memory.append((
+          _safe_copy(self.last_observation),
+          _safe_copy(self.last_action),
+          r,
+          _safe_copy(obs),
+          done
+        ))
 
-    self.last_observation = obs
-    self.last_action = action
+    self.last_observation = _safe_copy(obs)
+    self.last_action = _safe_copy(action)
 
     # remove old entries if necessary (delete generously so we don't have to do it often)
     if len(self.memory) > self.capacity:

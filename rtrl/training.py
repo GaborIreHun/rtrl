@@ -10,6 +10,7 @@ from rtrl.testing import Test
 from rtrl.util import pandas_dict, cached_property
 from rtrl.wrappers import StatsWrapper
 from rtrl.envs import GymEnv
+import numpy as np
 
 
 @dataclass(eq=0)
@@ -35,10 +36,16 @@ class Training:
     with StatsWrapper(self.Env(seed_val=self.seed+self.epoch), window=self.stats_window or self.steps) as env:
       for rnd in range(self.rounds):
         print(f"=== epoch {self.epoch}/{self.epochs} ".ljust(20, '=') + f" round {rnd}/{self.rounds} ".ljust(50, '='))
-        stats += self.run_round(env),
+        stats.append(self.run_round(env))
         print(stats[-1].add_prefix("  ").to_string(), '\n')
 
-    self.epoch += 1
+    # --- SAFE: call PopArt rescaling here, after all training ---
+    if hasattr(self.agent, "outputnorm"):
+        self.agent.outputnorm.rescale_layers()
+    if hasattr(self.agent, "outputnorm_target"):
+        self.agent.outputnorm_target.rescale_layers()
+
+    self.epoch = self.epoch + 1
     return stats
 
   def run_round(self, env):
@@ -55,7 +62,7 @@ class Training:
 
     for step in range(self.steps):
       action, training_stats = self.agent.act(*env.transition, train=True)
-      stats_training += training_stats
+      stats_training = stats_training + training_stats
       env.step(action)
 
     return pandas_dict(

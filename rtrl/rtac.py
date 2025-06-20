@@ -24,20 +24,27 @@ class Agent(rtrl.sac.Agent):
     self.model = model.to(device)
     self.model_target = no_grad(deepcopy(self.model))
 
-    self.outputnorm = self.OutputNorm(self.model.critic_output_layers)
-    self.outputnorm_target = self.OutputNorm(self.model_target.critic_output_layers)
-
+    self.actor_optimizer = torch.optim.Adam(self.model.actor.parameters(), lr=self.lr)
+    self.critic_optimizer = torch.optim.Adam(self.model.critics.parameters(), lr=self.lr)
     self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
     self.memory = Memory(self.memory_size, self.batchsize, device)
 
+    self.outputnorm = self.OutputNorm(self.model.critic_output_layers)
+    self.outputnorm_target = self.OutputNorm(self.model_target.critic_output_layers)
+
     self.is_training = False
+
+    # --- Debug: Ensure no parameter sharing between model and model_target ---
+    for i, (a, b) in enumerate(zip(self.model.critic_output_layers, self.model_target.critic_output_layers)):
+        assert a.weight.data_ptr() != b.weight.data_ptr(), f"Parameter sharing detected in critic_output_layers[{i}]"
+        assert a.bias.data_ptr() != b.bias.data_ptr(), f"Parameter sharing detected in critic_output_layers[{i}]"
 
   def train(self):
     obs, actions, rewards, next_obs, terminals = self.memory.sample()
     rewards, terminals = rewards[:, None], terminals[:, None]  # expand for correct broadcasting below
 
     new_action_distribution, _, hidden = self.model(obs)
-    new_actions = new_action_distribution.rsample()
+    new_actions = new_action_distribution.rsample().clone()
     new_actions_log_prob = new_action_distribution.log_prob(new_actions)[:, None]
 
     # critic loss
@@ -45,9 +52,16 @@ class Agent(rtrl.sac.Agent):
     next_value_target = reduce(torch.min, next_value_target)
 
     value_target = (1. - terminals) * self.discount * self.outputnorm_target.unnormalize(next_value_target)
-    value_target += self.reward_scale * rewards
-    value_target -= self.entropy_scale * new_actions_log_prob.detach()
-    value_target = self.outputnorm.update(value_target)
+    value_target = value_target + self.reward_scale * rewards
+    # 1) build the raw target and detach
+    value_target = (1. - terminals) * self.discount * self.outputnorm_target.unnormalize(next_value_target)
+    value_target = value_target + self.reward_scale * rewards
+    value_target = value_target - self.entropy_scale * new_actions_log_prob.detach()
+    value_target_detached = value_target.detach()
+
+    # 2) update PopArt stats and re-normalize out-of-place
+    self.outputnorm.update_stats(value_target_detached)
+    value_target = self.outputnorm.normalize(value_target_detached)
 
     values = tuple(c(h) for c, h in zip(self.model.critic_output_layers, hidden))  # recompute values (weights changed)
 
@@ -58,7 +72,7 @@ class Agent(rtrl.sac.Agent):
     _, next_value, _ = self.model_nograd(next_obs)
     next_value = reduce(torch.min, next_value)
     loss_actor = - (1. - terminals) * self.discount * self.outputnorm.unnormalize(next_value)
-    loss_actor += self.entropy_scale * new_actions_log_prob
+    loss_actor = loss_actor + self.entropy_scale * new_actions_log_prob
     assert loss_actor.shape == (self.batchsize, 1)
     loss_actor = self.outputnorm.normalize(loss_actor).mean()
 

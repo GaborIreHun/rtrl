@@ -17,10 +17,14 @@ def no_grad(model):
   return model
 
 
+@torch.no_grad()
 def exponential_moving_average(averages, values, factor):
-  with torch.no_grad():
-    for a, v in zip(averages, values):
-      a += factor * (v - a)  # equivalent to a = (1-factor) * a + factor * v
+  """
+  In-place exponential moving average: a ← (1-factor)*a + factor*v
+  """
+  for a, v in zip(averages, values):
+    # this updates the tensor `a` itself
+    a.copy_(a * (1 - factor) + v * factor)
 
 
 def copy_shared(model_a):
@@ -31,63 +35,128 @@ def copy_shared(model_a):
   for key in sda:
     a, b = sda[key], sdb[key]
     b.data = a.data  # strangely this will not make a.data and b.data the same object but their underlying data_ptr will be the same
-    assert b.storage().data_ptr() == a.storage().data_ptr()
+    assert b.untyped_storage().data_ptr() == a.untyped_storage().data_ptr()
   return model_b
 
+class PopArt(torch.nn.Module):
+    """PopArt normalization with safe, split update/rescale."""
 
-class PopArt(Module):
-  """PopArt http://papers.nips.cc/paper/6076-learning-values-across-many-orders-of-magnitude"""
-  def __init__(self, output_layer, beta: float = 0.0003, zero_debias: bool = True, start_pop: int = 8):
-    # zero_debias=True and start_pop=8 seem to improve things a little but (False, 0) works as well
-    super().__init__()
-    self.start_pop = start_pop
-    self.beta = beta
-    self.zero_debias = zero_debias
-    self.output_layers = output_layer if isinstance(output_layer, (tuple, list, torch.nn.ModuleList)) else (output_layer,)
-    shape = self.output_layers[0].bias.shape
-    device = self.output_layers[0].bias.device
-    assert all(shape == x.bias.shape for x in self.output_layers)
-    self.mean = Parameter(torch.zeros(shape, device=device), requires_grad=False)
-    self.mean_square = Parameter(torch.ones(shape, device=device), requires_grad=False)
-    self.std = Parameter(torch.ones(shape, device=device), requires_grad=False)
-    self.updates = 0
+    def __init__(self, output_layers, beta: float = 0.0003, zero_debias: bool = True, start_pop: int = 8):
+        super().__init__()
+        self.output_layers = output_layers
+        shape  = output_layers[0].bias.shape
+        device = output_layers[0].bias.device
 
-  @torch.no_grad()
-  def update(self, targets):
-    beta = max(1/(self.updates+1), self.beta) if self.zero_debias else self.beta
-    # note that for beta = 1/self.updates the resulting mean, std would be the true mean and std over all past data
+        self.beta        = beta
+        self.zero_debias = zero_debias
+        self.start_pop   = start_pop
 
-    new_mean = (1 - beta) * self.mean + beta * targets.mean(0)
-    new_mean_square = (1 - beta) * self.mean_square + beta * (targets * targets).mean(0)
-    new_std = (new_mean_square - new_mean * new_mean).sqrt().clamp(0.0001, 1e6)
+        # running stats
+        self.mean        = torch.nn.Parameter(torch.zeros(shape,     device=device), requires_grad=False)
+        self.mean_square = torch.nn.Parameter(torch.ones(shape,     device=device), requires_grad=False)
+        self.std         = torch.nn.Parameter(torch.ones(shape,     device=device), requires_grad=False)
+        self.updates     = 0
 
-    assert self.std.shape == (1,), 'this has only been tested in 1D'
+    @torch.no_grad()
+    def update_stats(self, targets: torch.Tensor):
+        """Update running mean & std (no in-place on actor/critic weights)."""
+        beta = max(1 / (self.updates + 1), self.beta) if self.zero_debias else self.beta
 
-    if self.updates >= self.start_pop:
-      for layer in self.output_layers:
-        # TODO: Properly apply PopArt in RTAC and remove the hack below
-        # We modify the weight while it's gradient is being computed
-        # Therefore we have to use .data (Pytorch would otherwise throw an error)
-        layer.weight *= self.std / new_std
-        layer.bias *= self.std
-        layer.bias += self.mean - new_mean
-        layer.bias /= new_std
+        new_mean        = (1 - beta) * self.mean        + beta * targets.mean(dim=0)
+        new_mean_square = (1 - beta) * self.mean_square + beta * (targets * targets).mean(dim=0)
+        new_std         = (new_mean_square - new_mean * new_mean).sqrt().clamp(min=1e-4)
 
-    self.mean.copy_(new_mean)
-    self.mean_square.copy_(new_mean_square)
-    self.std.copy_(new_std)
-    self.updates += 1
-    return self.normalize(targets)
+        self.mean.copy_(new_mean)
+        self.mean_square.copy_(new_mean_square)
+        self.std.copy_(new_std)
+        self.updates = self.updates + 1
 
-  def normalize(self, x):
-    return (x - self.mean) / self.std
+    @torch.no_grad()
+    def rescale_layers(self):
+        """Rescale output layers to keep their outputs consistent."""
+        if self.updates >= self.start_pop:
+            for layer in self.output_layers:
+                scale     = (self.std / self.std.detach())
+                bias_term = (self.mean - self.mean.detach())
+                layer.weight.copy_((layer.weight * scale.unsqueeze(-1)).detach())
+                layer.bias  .copy_(((layer.bias + bias_term) * scale).detach())
 
-  def unnormalize(self, value):
-    return value * self.std + self.mean
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Out‐of‐place normalization."""
+        return (x - self.mean) / self.std
+
+    def unnormalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert normalized preds back to original scale."""
+        return x * self.std + self.mean
+    """PopArt normalization with safe, split update/rescale."""
+
+    def __init__(self, output_layers, beta: float = 0.0003,
+                 zero_debias: bool = True, start_pop: int = 8):
+        super().__init__()
+        self.output_layers = output_layers
+        shape  = output_layers[0].bias.shape
+        device = output_layers[0].bias.device
+
+        self.beta         = beta
+        self.zero_debias  = zero_debias
+        self.start_pop    = start_pop
+        self.mean         = torch.nn.Parameter(torch.zeros(shape,
+                                         device=device), requires_grad=False)
+        self.mean_square = torch.nn.Parameter(torch.ones(shape,
+                                         device=device), requires_grad=False)
+        self.std          = torch.nn.Parameter(torch.ones(shape,
+                                         device=device), requires_grad=False)
+        self.updates      = 0
+
+    @torch.no_grad()
+    def update_stats(self, targets: torch.Tensor):
+        """
+        Update running mean & std only (no in-place on autograd tensors).
+        """
+        beta = max(1 / (self.updates + 1), self.beta) \
+               if self.zero_debias else self.beta
+
+        # new first & second moments
+        new_mean        = (1 - beta) * self.mean \
+                          + beta * targets.mean(dim=0)
+        new_mean_square = (1 - beta) * self.mean_square \
+                          + beta * (targets * targets).mean(dim=0)
+        new_std         = (new_mean_square - new_mean * new_mean) \
+                          .sqrt().clamp(min=1e-4)
+
+        # commit stats (no grad)
+        self.mean       .copy_(new_mean)
+        self.mean_square.copy_(new_mean_square)
+        self.std        .copy_(new_std)
+        self.updates = self.updates + 1
+
+    @torch.no_grad()
+    def rescale_layers(self):
+        """
+        After stats have been updated, adjust each output layer so its
+        outputs remain consistent. Call only when no graph is alive.
+        """
+        if self.updates >= self.start_pop:
+            for layer in self.output_layers:
+                scale     = (self.std / self.std.detach())
+                bias_term = (self.mean - self.mean.detach())
+                layer.weight.copy_((layer.weight * scale.unsqueeze(-1)).detach())
+                layer.bias  .copy_(((layer.bias + bias_term) * scale).detach())
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Out-of-place normalization using running stats."""
+        return (x - self.mean) / self.std
+
+    def unnormalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert normalized preds back to original scale."""
+        return x * self.std + self.mean
 
 
 # noinspection PyAbstractClass
 class TanhNormal(Distribution):
+  # If passed in an out-of-range value (e.g. something outside −1,1−1,1 to the TanhNormal),
+  # PyTorch wouldn’t raise a ValueError
+  arg_constraints = {}
   """Distribution of X ~ tanh(Z) where Z ~ N(mean, std)
   Adapted from https://github.com/vitchyr/rlkit
   """

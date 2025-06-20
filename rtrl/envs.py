@@ -33,11 +33,16 @@ class Env(gym.Wrapper):
             done = terminated or truncated
         else:
             observation, reward, done, info = result
+          # Always copy observation
+        if isinstance(observation, np.ndarray):
+            observation = np.copy(observation)
         next_state = self.reset() if done else self.observation(observation)
         self.transition = (next_state, reward, done, info)
         return self.transition
 
     def observation(self, observation):
+        if isinstance(observation, np.ndarray):
+          observation = np.copy(observation)
         return observation
 
 

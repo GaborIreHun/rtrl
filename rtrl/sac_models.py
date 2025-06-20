@@ -8,6 +8,7 @@ from rtrl.util import collate, partition
 from torch.nn import Linear, Sequential, ReLU, ModuleList, Module
 from rtrl.nn import TanhNormalLayer, SacLinear, big_conv
 
+DEBUGGER = True
 
 class ActorModule(Module):
   device = 'cpu'
@@ -38,7 +39,12 @@ class MlpActionValue(Sequential):
   # noinspection PyMethodOverriding
   def forward(self, obs, action):
     x = torch.cat((*obs, action), 1)
-    return super().forward(x)
+    if DEBUGGER:
+      print("MLP Critic input version:", x._version)
+    out = super().forward(x)
+    if DEBUGGER:
+      print("MLP Critic output version:", out._version)
+    return out
 
 
 class MlpPolicy(Sequential):
@@ -122,8 +128,18 @@ class ConvCritic(Module):
     x = x / 255 - 0.5
     x = self.conv(x)
     x = x.view(x.size(0), -1)
+    x_cat1 = torch.cat((x, vec, *aux, a), -1)
+    if DEBUGGER:
+      print("ConvCritic cat1 version:", x_cat1._version)
     x = leaky_relu(self.lin1(torch.cat((x, vec, *aux, a), -1)))
+    if DEBUGGER:
+      print("ConvCritic lin1 version:", x._version)
+    x_cat2 = torch.cat((x, vec, *aux, a), -1)
+    if DEBUGGER:
+      print("ConvCritic cat2 version:", x_cat2._version)
     x = leaky_relu(self.lin2(torch.cat((x, vec, *aux, a), -1)))
+    if DEBUGGER:
+      print("ConvCritic lin2 version:", x._version)
     x = self.output_layer(x)
     return x
 

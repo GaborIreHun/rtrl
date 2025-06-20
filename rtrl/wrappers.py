@@ -26,7 +26,8 @@ class RealTimeWrapper(gym.Wrapper):
             observation = result
             info = {}
         print("Observation shape:", np.asarray(observation, dtype=np.float32).shape)
-        return np.concatenate([np.asarray(observation, dtype=np.float32), self.previous_action])
+        obs = np.concatenate([np.asarray(observation, dtype=np.float32), self.previous_action])
+        return np.copy(obs) 
 
     def step(self, action):
         # 1) step the underlying env
@@ -47,7 +48,7 @@ class RealTimeWrapper(gym.Wrapper):
         obs_combined = np.concatenate(
             [np.asarray(observation, dtype=np.float32), self.previous_action]
         )
-        return obs_combined, reward, done, info
+        return np.copy(obs_combined), reward, done, info 
 
 class PreviousActionWrapper(gym.Wrapper):
     def __init__(self, env):
@@ -68,7 +69,8 @@ class PreviousActionWrapper(gym.Wrapper):
         else:
             observation = result
             info = {}
-        return np.concatenate([np.asarray(observation, dtype=np.float32), self.previous_action])
+        obs = np.concatenate([np.asarray(observation, dtype=np.float32), self.previous_action])
+        return np.copy(obs)
 
     def step(self, action):
         result = super().step(action)
@@ -80,7 +82,7 @@ class PreviousActionWrapper(gym.Wrapper):
         else:
             raise RuntimeError(f"Unexpected number of elements returned from env.step: {len(result)}")
         self.previous_action = np.asarray(action, dtype=np.float32)
-        return np.concatenate([np.asarray(observation, dtype=np.float32), self.previous_action]), reward, done, info    
+        return np.copy(np.concatenate([np.asarray(observation, dtype=np.float32), self.previous_action])), reward, done, info    
 
 
 class StatsWrapper(gym.Wrapper):
@@ -93,7 +95,10 @@ class StatsWrapper(gym.Wrapper):
     self.total_steps = 0
 
   def reset(self, **kwargs):
-    return super().reset(**kwargs)
+    obs = super().reset(**kwargs)
+    if isinstance(obs, np.ndarray):
+        obs = np.copy(obs)
+    return obs
 
   def step(self, action):
     # call the next wrapper/env
@@ -110,17 +115,17 @@ class StatsWrapper(gym.Wrapper):
     # record statistics
     self.reward_hist.append(reward)
     self.done_hist.append(done)
-    self.total_steps += 1
+    self.total_steps = self.total_steps + 1
 
     # always return obs, reward, done, info
-    return obs, reward, done, info
+    return np.copy(obs), reward, done, info
 
   def stats(self):
     returns = [0]
     steps = [0]
     for reward, done in zip(self.reward_hist, self.done_hist):
-      returns[-1] += reward
-      steps[-1] += 1
+      returns[-1] = returns[-1] + reward
+      steps[-1] = steps[-1] + 1
       if done:
         returns.append(0)
         steps.append(0)
@@ -142,7 +147,10 @@ class DictObservationWrapper(gym.ObservationWrapper):
     self.observation_space = gym.spaces.Dict({self.key: env.observation_space})
 
   def observation(self, observation):
-    return {self.key: observation}
+    obs = observation
+    if isinstance(obs, np.ndarray):
+        obs = np.copy(obs)
+    return {self.key: obs}
 
 
 class TupleObservationWrapper(gym.ObservationWrapper):
@@ -154,9 +162,15 @@ class TupleObservationWrapper(gym.ObservationWrapper):
         result = self.env.reset(**kwargs)
         if isinstance(result, tuple):
             observation, info = result
-            return (self.observation(observation), info)
+            obs = self.observation(observation)
+            if isinstance(obs[0], np.ndarray):
+                obs = (np.copy(obs[0]),)
+            return obs, info
         else:
-            return self.observation(result)
+            obs = self.observation(result)
+            if isinstance(obs[0], np.ndarray):
+                obs = (np.copy(obs[0]),)
+            return obs
         
     def step(self, action):
         # call through to the wrapped env
@@ -172,10 +186,16 @@ class TupleObservationWrapper(gym.ObservationWrapper):
 
         # wrap the obs in a 1-tuple just like reset()
         wrapped_obs = (observation,)
+        # If observation is a numpy array, copy it
+        if isinstance(wrapped_obs[0], np.ndarray):
+            wrapped_obs = (np.copy(wrapped_obs[0]),)
         return wrapped_obs, reward, done, info
 
     def observation(self, observation):
-        return (observation,)
+        obs = observation
+        if isinstance(obs, np.ndarray):
+            obs = np.copy(obs)
+        return (obs,)
 
 
 class DictActionWrapper(gym.Wrapper):
@@ -197,7 +217,10 @@ class AffineObservationWrapper(gym.ObservationWrapper):
     self.observation_space = gym.spaces.Box(self.observation(env.observation_space.low), self.observation(env.observation_space.high), dtype=env.observation_space.dtype)
 
   def observation(self, obs):
-    return (obs + self.shift) * self.scale
+    out = (obs + self.shift) * self.scale
+    if isinstance(out, np.ndarray):
+        out = np.copy(out)
+    return out
 
 
 class AffineRewardWrapper(gym.RewardWrapper):
@@ -218,20 +241,28 @@ class NormalizeActionWrapper(gym.Wrapper):
         self.action_space = gym.spaces.Box(-np.ones_like(self.shift), np.ones_like(self.shift), dtype=env.action_space.dtype)
 
     def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
+        obs = self.env.reset(**kwargs)
+        if isinstance(obs, np.ndarray):
+            obs = np.copy(obs)
+        return obs
 
     def step(self, action):
         action = action / 2 + 0.5  # 0 < a < 1
         action = action * self.scale + self.shift
         result = self.env.step(action)
         if len(result) == 5:
-            return result
+            obs, reward, terminated, truncated, info = result
+            # Always copy obs if it's a numpy array
+            if isinstance(obs, np.ndarray):
+                obs = np.copy(obs)
+            return obs, reward, terminated, truncated, info
         elif len(result) == 4:
             obs, reward, done, info = result
+            if isinstance(obs, np.ndarray):
+                obs = np.copy(obs)
             return obs, reward, done, False, info
         else:
             raise RuntimeError(f"Unexpected number of elements returned from env.step: {len(result)}")
-
 
 class TimeLimitResetWrapper(gym.Wrapper):
     def __init__(self, env, max_steps=None, key='reset'):
@@ -248,6 +279,11 @@ class TimeLimitResetWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         m = self.env.reset(**kwargs)
         self.t = 0
+        if isinstance(m, np.ndarray):
+            m = np.copy(m)
+        # If using new Gym API (tuple), also handle that:
+        if isinstance(m, tuple) and isinstance(m[0], np.ndarray):
+            m = (np.copy(m[0]), *m[1:])
         return m
 
     def step(self, action):
@@ -264,7 +300,7 @@ class TimeLimitResetWrapper(gym.Wrapper):
         else:
             d = d or reset
         info = {**info, self.reset_key: reset}
-        self.t += 1
+        self.t = self.t + 1
         return m, r, d, info
 
 
@@ -273,6 +309,8 @@ class Float64ToFloat32(gym.ObservationWrapper):
 
     def observation(self, observation):
         observation = deepmap({np.ndarray: float64_to_float32}, observation)
+        if isinstance(observation, np.ndarray):
+            observation = np.copy(observation)
         return observation
 
     def step(self, action):
