@@ -22,7 +22,8 @@ To train an RTAC agent on the basic `Pendulum-v1` task run
 ```bash
 python -m rtrl run rtrl:RtacTraining Env.id=Pendulum-v1
 ```
-
+#### Issues and Fixes (More details in [CHANGES.md](./CHANGES.md))
+The main error encountered during this experiment was related to PyTorch's in-place modification/versioning error, triggered by improper handling of tensor operations. It was systematically resolved by explicitly ensuring all observations and actions were properly copied at each step in every environment wrapper (RealTimeWrapper, PreviousActionWrapper, and StatsWrapper). Additionally, careful checks were implemented in the replay buffer (memory.py) and training loop (rtac.py, training.py) to detect and eliminate any unintended in-place operations. These adjustments prevented versioning conflicts in gradient computation, resulting in stable and error-free training.
 
 
 ### Mujoco Experiments
@@ -31,14 +32,23 @@ To install Mujoco you follow the instructions at [openai/gym](https://github.com
 ![MuJoCo](resources/mujoco_horizontal.png)
 
 
-To train an RTAC agent on `HalfCheetah-v2` run
+To train an RTAC agent on `HalfCheetah-v4` run
 ```bash
-python -m rtrl run rtrl:RtacTraining Env.id=HalfCheetah-v2
+python -m rtrl run rtrl:RtacTraining Env.id=HalfCheetah-v4
+```
+```bash
+python -m rtrl run-fs experiment-2 rtrl:RtacTraining Env.id=HalfCheetah-v4
 ```
 
-To train a SAC agent on `Ant-v2` with a real-time wrapper (i.e. RTMDP in the paper) run
+#### Issues and Fixes (More details in [CHANGES.md](./CHANGES.md))
+The primary blocker in this experiment was the same PyTorch in-place operation/versioning error, causing interruptions during backpropagation. The issue was addressed similarly by rigorously enforcing deep-copy semantics on all environment-generated tensors (observations and actions) at every wrapper level, and within replay buffers (memory.py). Furthermore, thorough verification was performed on RTAC network model code (rtac_models.py) and loss computations in (rtac.py) to remove inadvertent in-place updates, stabilizing gradient computations. These changes allowed training on the more complex Mujoco environment (HalfCheetah-v4) without errors.
+
+To train a SAC agent on `Ant-v4` with a real-time wrapper (i.e. RTMDP in the paper) run
 ```bash
-python -m rtrl run rtrl:SacTraining Env.id=Ant-v2 Env.real_time=True
+python -m rtrl run rtrl:SacTraining Env.id=Ant-v4 Env.real_time=True
+```
+```bash
+python -m rtrl run-fs experiment-3 rtrl:SacTraining Env.id=Ant-v4 Env.real_time=True
 ```
 
 ### Avenue Experiments
